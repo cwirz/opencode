@@ -46,7 +46,9 @@ export function path() {
     return join(Global.Path.data, Flag.OPENCODE_DB)
   }
   if (
-    ["latest", "beta", "prod"].includes(InstallationChannel) ||
+    // ponytail: fork shares the official app's opencode.db so sessions carry over.
+    // same upstream version => same schema; revert this line if the fork's DB migrations diverge.
+    ["latest", "beta", "prod", "local"].includes(InstallationChannel) ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
   )
