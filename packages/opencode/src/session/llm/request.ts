@@ -18,6 +18,9 @@ import { mergeDeep } from "remeda"
 const USER_AGENT = `opencode/${InstallationVersion}`
 const TOOL_DESCRIPTION_MAX = 800
 const SCHEMA_PROSE_KEYS = new Set(["$comment", "default", "deprecated", "description", "examples", "example", "title"])
+// Core tools used on nearly every turn. Keep them full so the model never has to
+// round-trip through tool_schema before a basic action (esp. bash arg shape).
+const KEEP_FULL = new Set(["bash", "read", "edit", "write", "task", "todowrite", "glob", "grep"])
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -209,14 +212,18 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
 
 export function compactTools(tools: Record<string, Tool>): Record<string, Tool> {
   return Object.fromEntries(
-    Object.entries(tools).map(([name, item]) => [
-      name,
-      {
-        ...item,
-        description: compactDescription(item.description),
-        inputSchema: jsonSchema(compactSchema(toolSchema(item.inputSchema))),
-      } satisfies Tool,
-    ]),
+    Object.entries(tools).map(([name, item]) =>
+      KEEP_FULL.has(name)
+        ? [name, item]
+        : [
+            name,
+            {
+              ...item,
+              description: compactDescription(item.description),
+              inputSchema: jsonSchema(compactSchema(toolSchema(item.inputSchema))),
+            } satisfies Tool,
+          ],
+    ),
   )
 }
 
@@ -286,8 +293,31 @@ function isPromiseLike(value: unknown): value is PromiseLike<JSONSchema7> {
   return !!value && typeof value === "object" && "then" in value && typeof value.then === "function"
 }
 
+// Keys whose VALUES are maps of name -> subschema. Their keys are user-defined
+// names (e.g. a property literally named "description"), NOT schema keywords,
+// so we must recurse into the values without treating the names as prose keys.
+const SCHEMA_NAMED_CHILDREN = new Set(["properties", "patternProperties", "$defs", "definitions"])
+
+// ponytail: hand-walk the schema instead of a blind JSON.stringify replacer.
+// A replacer can't tell the schema keyword "description" from a property NAMED
+// "description" (e.g. the task tool), and would strip the latter, breaking required.
 function compactSchema(value: JSONSchema7): JSONSchema7 {
-  return JSON.parse(JSON.stringify(value, (key, child) => (SCHEMA_PROSE_KEYS.has(key) ? undefined : child)))
+  if (Array.isArray(value)) return value.map((item) => compactSchema(item as JSONSchema7)) as unknown as JSONSchema7
+  if (!value || typeof value !== "object") return value
+
+  const out: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value)) {
+    if (SCHEMA_PROSE_KEYS.has(key)) continue
+    if (SCHEMA_NAMED_CHILDREN.has(key) && child && typeof child === "object" && !Array.isArray(child)) {
+      // Recurse into each subschema but keep the user-defined names verbatim.
+      out[key] = Object.fromEntries(
+        Object.entries(child as Record<string, unknown>).map(([name, sub]) => [name, compactSchema(sub as JSONSchema7)]),
+      )
+      continue
+    }
+    out[key] = compactSchema(child as JSONSchema7)
+  }
+  return out as JSONSchema7
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

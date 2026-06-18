@@ -39,6 +39,58 @@ describe("LLM request prep", () => {
     })
   })
 
+  test("compactTools keeps a property literally named description", () => {
+    // Regression: the task tool has a required property NAMED "description".
+    // The compactor must strip schema-keyword prose but keep property names.
+    // Use a non-core tool name so compaction actually runs (task is kept full).
+    const tools = compactTools({
+      mcp_thing: tool({
+        description: "Launch a subagent",
+        inputSchema: jsonSchema({
+          type: "object",
+          description: "Root prose",
+          properties: {
+            description: { type: "string", description: "param prose" },
+            prompt: { type: "string" },
+          },
+          required: ["description", "prompt"],
+        }),
+        execute: async () => ({ output: "", title: "", metadata: {} }),
+      }),
+    })
+
+    expect(asSchema(tools.mcp_thing.inputSchema).jsonSchema).toEqual({
+      type: "object",
+      properties: {
+        description: { type: "string" },
+        prompt: { type: "string" },
+      },
+      required: ["description", "prompt"],
+    })
+  })
+
+  test("compactTools keeps core tools (bash) full", () => {
+    const longDesc = "B".repeat(900)
+    const tools = compactTools({
+      bash: tool({
+        description: longDesc,
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: { command: { type: "string", description: "the command" } },
+          required: ["command"],
+        }),
+        execute: async () => ({ output: "", title: "", metadata: {} }),
+      }),
+    })
+
+    expect(tools.bash.description).toBe(longDesc)
+    expect(asSchema(tools.bash.inputSchema).jsonSchema).toEqual({
+      type: "object",
+      properties: { command: { type: "string", description: "the command" } },
+      required: ["command"],
+    })
+  })
+
   test("compactToolsWithReveal exposes full schema on demand", async () => {
     const tools = compactToolsWithReveal({
       sample: tool({
