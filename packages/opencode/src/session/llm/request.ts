@@ -1,21 +1,23 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import type { Auth } from "@/auth"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
 import type { Agent } from "@/agent/agent"
-import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
-import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
+import { asSchema, jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
+const TOOL_DESCRIPTION_MAX = 800
+const SCHEMA_PROSE_KEYS = new Set(["$comment", "default", "deprecated", "description", "examples", "example", "title"])
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -33,6 +35,7 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly toolSchema?: "full" | "compact"
 }
 
 export type Prepared = {
@@ -145,7 +148,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   )
 
-  const tools = resolveTools(input)
+  const resolvedTools = resolveTools(input)
+  const tools = input.toolSchema === "compact" ? compactToolsWithReveal(resolvedTools) : resolvedTools
   if (
     input.model.providerID.includes("github-copilot") &&
     Object.keys(tools).length === 0 &&
@@ -201,6 +205,89 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
   return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+}
+
+export function compactTools(tools: Record<string, Tool>): Record<string, Tool> {
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, item]) => [
+      name,
+      {
+        ...item,
+        description: compactDescription(item.description),
+        inputSchema: jsonSchema(compactSchema(toolSchema(item.inputSchema))),
+      } satisfies Tool,
+    ]),
+  )
+}
+
+export function compactToolsWithReveal(tools: Record<string, Tool>): Record<string, Tool> {
+  return {
+    ...compactTools(tools),
+    tool_schema: toolSchemaReveal(tools),
+  }
+}
+
+function toolSchemaReveal(tools: Record<string, Tool>): Tool {
+  const names = Object.keys(tools).toSorted((a, b) => a.localeCompare(b))
+  return aiTool({
+    description: "Reveal full description and input schema for an active tool when compact tool schemas omit needed detail.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Active tool name to inspect.",
+          enum: names,
+        },
+      },
+      required: ["name"],
+    }),
+    execute: async (input) => {
+      const name = typeof input === "object" && input !== null && "name" in input ? String(input.name) : ""
+      const item = tools[name]
+      if (!item) {
+        return {
+          title: "Tool not found",
+          metadata: {},
+          output: JSON.stringify({ error: "Unknown tool", available: names }, null, 2),
+        }
+      }
+      return {
+        title: name,
+        metadata: {},
+        output: JSON.stringify(
+          {
+            name,
+            description: item.description ?? "",
+            inputSchema: toolSchema(item.inputSchema),
+          },
+          null,
+          2,
+        ),
+      }
+    },
+  })
+}
+
+function compactDescription(value: string | undefined) {
+  if (!value) return value
+  const compact = value.replace(/\s+/g, " ").trim()
+  if (compact.length <= TOOL_DESCRIPTION_MAX) return compact
+  return compact.slice(0, TOOL_DESCRIPTION_MAX - 3).trimEnd() + "..."
+}
+
+function toolSchema(value: Tool["inputSchema"]): JSONSchema7 {
+  const schema = asSchema(value).jsonSchema
+  if (isPromiseLike(schema)) throw new Error("Cannot compact asynchronous tool schema")
+  return schema
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<JSONSchema7> {
+  return !!value && typeof value === "object" && "then" in value && typeof value.then === "function"
+}
+
+function compactSchema(value: JSONSchema7): JSONSchema7 {
+  return JSON.parse(JSON.stringify(value, (key, child) => (SCHEMA_PROSE_KEYS.has(key) ? undefined : child)))
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

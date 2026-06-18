@@ -84,6 +84,18 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
 
 type MCPClient = Client
 
+// ponytail: in-memory per-session activation of lazy MCP servers. Cleared on restart.
+// Persist to session storage only if surviving restarts matters.
+const activatedLazy = new Map<string, Set<string>>()
+function lazyActivate(sessionID: string, server: string) {
+  let set = activatedLazy.get(sessionID)
+  if (!set) activatedLazy.set(sessionID, (set = new Set()))
+  set.add(server)
+}
+function lazyActivated(sessionID: string | undefined, server: string) {
+  return !!sessionID && !!activatedLazy.get(sessionID)?.has(server)
+}
+
 function createClient(directory: string) {
   const client = new Client({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
   client.setRequestHandler(ListRootsRequestSchema, () =>
@@ -159,7 +171,11 @@ interface State {
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
-  readonly tools: () => Effect.Effect<Record<string, Tool>>
+  readonly tools: (sessionID?: string) => Effect.Effect<Record<string, Tool>>
+  readonly lazyServers: (
+    sessionID?: string,
+  ) => Effect.Effect<Array<{ name: string; toolCount: number; activated: boolean }>>
+  readonly activateLazy: (sessionID: string, server: string) => Effect.Effect<{ ok: boolean; toolCount: number }>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -625,7 +641,14 @@ export const layer = Layer.effect(
       return s.config[name]?.timeout ?? staticTimeout ?? fallback
     }
 
-    const tools = Effect.fn("MCP.tools")(function* () {
+    function isLazyDeferred(cfg: ConfigV1.Info, clientName: string, sessionID?: string) {
+      if (!cfg.experimental?.mcp_lazy) return false
+      const mcpConfig = cfg.mcp?.[clientName]
+      if (!mcpConfig || !isMcpConfigured(mcpConfig) || !mcpConfig.lazy) return false
+      return !lazyActivated(sessionID, clientName)
+    }
+
+    const tools = Effect.fn("MCP.tools")(function* (sessionID?: string) {
       const result: Record<string, Tool> = {}
       const s = yield* InstanceState.get(state)
 
@@ -635,6 +658,7 @@ export const layer = Layer.effect(
 
       for (const [clientName, client] of Object.entries(s.clients)) {
         if (s.status[clientName]?.status !== "connected") continue
+        if (isLazyDeferred(cfg, clientName, sessionID)) continue
         const mcpConfig = config[clientName]
         const listed = s.defs[clientName]
         if (!listed) {
@@ -648,6 +672,32 @@ export const layer = Layer.effect(
         }
       }
       return result
+    })
+
+    const lazyServers = Effect.fn("MCP.lazyServers")(function* (sessionID?: string) {
+      const s = yield* InstanceState.get(state)
+      const cfg = yield* cfgSvc.get()
+      if (!cfg.experimental?.mcp_lazy) return []
+      const result: Array<{ name: string; toolCount: number; activated: boolean }> = []
+      for (const clientName of Object.keys(s.clients)) {
+        if (s.status[clientName]?.status !== "connected") continue
+        const mcpConfig = cfg.mcp?.[clientName]
+        if (!mcpConfig || !isMcpConfigured(mcpConfig) || !mcpConfig.lazy) continue
+        result.push({
+          name: clientName,
+          toolCount: s.defs[clientName]?.length ?? 0,
+          activated: lazyActivated(sessionID, clientName),
+        })
+      }
+      return result
+    })
+
+    const activateLazy = Effect.fn("MCP.activateLazy")(function* (sessionID: string, server: string) {
+      const s = yield* InstanceState.get(state)
+      const connected = s.status[server]?.status === "connected"
+      if (!connected) return { ok: false, toolCount: 0 }
+      lazyActivate(sessionID, server)
+      return { ok: true, toolCount: s.defs[server]?.length ?? 0 }
     })
 
     function collectFromConnected<T extends { name: string }>(
@@ -918,6 +968,8 @@ export const layer = Layer.effect(
       status,
       clients,
       tools,
+      lazyServers,
+      activateLazy,
       prompts,
       resources,
       add,

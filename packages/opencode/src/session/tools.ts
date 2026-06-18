@@ -114,7 +114,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  for (const [key, item] of Object.entries(yield* mcp.tools())) {
+  for (const [key, item] of Object.entries(yield* mcp.tools(input.session.id))) {
     const execute = item.execute
     if (!execute) continue
 
@@ -199,6 +199,38 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       )
     tools[key] = item
+  }
+
+  // ponytail: lazy MCP groups. Withheld servers shown as one mcp_load tool; agent loads on demand.
+  const lazy = yield* mcp.lazyServers(input.session.id)
+  const deferred = lazy.filter((s) => !s.activated)
+  if (deferred.length > 0) {
+    const list = deferred.map((s) => `- ${s.name} (${s.toolCount} tools)`).join("\n")
+    tools["mcp_load"] = tool({
+      description:
+        "Load the tools of a deferred MCP server into this session. Their tools become available on your next step. Deferred servers:\n" +
+        list,
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          server: { type: "string", enum: deferred.map((s) => s.name) },
+        },
+        required: ["server"],
+        additionalProperties: false,
+      }),
+      execute(args) {
+        return run.promise(
+          Effect.gen(function* () {
+            const server = (args as { server?: string }).server ?? ""
+            const result = yield* mcp.activateLazy(input.session.id, server)
+            const text = result.ok
+              ? `Loaded ${result.toolCount} tools from "${server}". They are available starting next step.`
+              : `Could not load "${server}" (not connected or unknown).`
+            return { title: server, metadata: {}, output: text }
+          }),
+        )
+      },
+    })
   }
 
   return tools

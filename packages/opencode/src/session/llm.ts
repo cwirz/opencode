@@ -14,7 +14,6 @@ import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
-import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -110,6 +109,7 @@ const live: Layer.Layer<
         plugin,
         flags,
         isWorkflow,
+        toolSchema: cfg.experimental?.tool_schema,
       })
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
