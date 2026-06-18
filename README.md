@@ -1,3 +1,7 @@
+> **Fork notice:** This is a fork of [anomalyco/opencode](https://github.com/anomalyco/opencode)
+> with compact tool schemas, lazy MCP tool loading, and shared session history.
+> See **[FORK.md](./FORK.md)**. Install: `brew install cwirz/opencode/opencode-cwirz`.
+
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
